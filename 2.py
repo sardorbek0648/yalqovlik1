@@ -1,10 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-SHOP BOT — FULL SINGLE-FILE VERSION
-Author: ChatGPT
-Notes:
-- Requires: python-telegram-bot v20+, pymysql, openpyxl
-- Configure TOKEN, DB creds below.
+SHOP BOT — FULL SINGLE-FILE VERSION (RAILWAY-READY)
+- python-telegram-bot v20+, pymysql, openpyxl
+- TOKEN va DB ma'lumotlar Railway Variables (ENV) dan olinadi.
 """
 
 import os
@@ -29,14 +27,31 @@ logging.basicConfig(
 def log_error(e: Exception):
     logging.exception(e)
 
-# ===================== CONFIG =====================
-TOKEN = "8539404211:AAHDyn8jngmul6gO9pqTJP9Vypx9ZFVNtAg"
-PRIMARY_ADMIN_ID = 5788278697
+# ===================== CONFIG (ENV) =====================
+# Railway -> Variables:
+# BOT_TOKEN, PRIMARY_ADMIN_ID, DB_HOST, DB_USER, DB_PASS, DB_NAME, DB_PORT
 
-DB_HOST = "localhost"
-DB_USER = "root"          # consider dedicated user
-DB_PASS = "sardorbek06."
-DB_NAME = "shop_bot"
+TOKEN = os.getenv("BOT_TOKEN", "").strip()
+PRIMARY_ADMIN_ID = int(os.getenv("PRIMARY_ADMIN_ID", "0"))
+
+DB_HOST = os.getenv("DB_HOST", "").strip()
+DB_USER = os.getenv("DB_USER", "").strip()
+DB_PASS = os.getenv("DB_PASS", "").strip()
+DB_NAME = os.getenv("DB_NAME", "").strip()
+DB_PORT = int(os.getenv("DB_PORT", "3306"))
+
+def validate_env():
+    """ENV to'liq ekanini tekshiradi"""
+    missing = []
+    if not TOKEN: missing.append("BOT_TOKEN")
+    if PRIMARY_ADMIN_ID == 0: missing.append("PRIMARY_ADMIN_ID")
+    if not DB_HOST: missing.append("DB_HOST")
+    if not DB_USER: missing.append("DB_USER")
+    if not DB_NAME: missing.append("DB_NAME")
+    # DB_PASS bo'sh bo'lishi ham mumkin (ba'zi hostlarda), shuning uchun majburlamaymiz
+
+    if missing:
+        raise RuntimeError(f"ENV yetishmayapti: {', '.join(missing)}")
 
 # ===================== STATES =====================
 (
@@ -64,22 +79,37 @@ DB_NAME = "shop_bot"
 
 # ===================== DATABASE =====================
 def get_db(no_db: bool = False):
+    """Har safar yangi connection ochamiz (Railway uchun barqarorroq)."""
     return pymysql.connect(
         host=DB_HOST,
         user=DB_USER,
         password=DB_PASS,
         database=None if no_db else DB_NAME,
+        port=DB_PORT,
+        charset="utf8mb4",
         cursorclass=pymysql.cursors.DictCursor,
         autocommit=True
     )
 
 def init_db():
+    """
+    Railway MySQL’da ko‘pincha CREATE DATABASE ruxsat berilmaydi.
+    Shuning uchun:
+    - CREATE DATABASE’ni urinib ko‘ramiz, bo‘lmasa ignore
+    - Keyin TABLE’larni yaratamiz
+    """
     try:
-        db = get_db(no_db=True)
-        with db.cursor() as c:
-            c.execute(f"CREATE DATABASE IF NOT EXISTS {DB_NAME}")
-        db.close()
+        # 1) Database yaratishni urinib ko'ramiz (ruxsat bo'lmasa xato bo'lishi mumkin)
+        try:
+            db = get_db(no_db=True)
+            with db.cursor() as c:
+                c.execute(f"CREATE DATABASE IF NOT EXISTS `{DB_NAME}`")
+            db.close()
+        except Exception as e:
+            # Railway’da odatda DB oldindan bor bo‘ladi — shu xatoni e’tiborsiz qoldiramiz
+            log_error(e)
 
+        # 2) Table’lar
         db = get_db()
         with db.cursor() as c:
             c.execute("""
@@ -116,12 +146,11 @@ def get_role(uid: int):
         with db.cursor() as c:
             c.execute("SELECT role FROM users WHERE telegram_id=%s", (uid,))
             r = c.fetchone()
+        db.close()
         return r["role"] if r else None
-    except Exception:
+    except Exception as e:
+        log_error(e)
         return None
-
-def is_int(s: str) -> bool:
-    return s.isdigit()
 
 # ===================== MENUS =====================
 def menu_primary():
@@ -171,10 +200,13 @@ async def show_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with db.cursor() as c:
             c.execute("SELECT * FROM phones WHERE quantity>0")
             rows = c.fetchall()
+        db.close()
+
         if not rows:
             await update.message.reply_text("📭 Telefon yo‘q")
             await update.message.reply_text("📊 Umumiy: 0")
             return
+
         total = 0
         msg = "📦 Mavjud telefonlar:\n\n"
         for r in rows:
@@ -214,8 +246,10 @@ async def add_phone_manual(update, context):
         if len(parts) != 3 or not parts[2].isdigit():
             await update.message.reply_text("❌ Format xato")
             return ConversationHandler.END
+
         pid, name, qty = parts
         qty = int(qty)
+
         db = get_db()
         with db.cursor() as c:
             c.execute("SELECT quantity FROM phones WHERE phone_id=%s", (pid,))
@@ -224,6 +258,8 @@ async def add_phone_manual(update, context):
                 c.execute("UPDATE phones SET quantity=quantity+%s WHERE phone_id=%s", (qty, pid))
             else:
                 c.execute("INSERT INTO phones VALUES (%s,%s,%s)", (pid, name, qty))
+        db.close()
+
         await update.message.reply_text("✅ Telefon qo‘shildi")
     except Exception as e:
         log_error(e)
@@ -237,6 +273,7 @@ async def add_phone_excel(update, context):
         if not doc or not doc.file_name.endswith(".xlsx"):
             await update.message.reply_text("❌ Faqat .xlsx")
             return ADD_PHONE_EXCEL
+
         file = await doc.get_file()
         path = f"temp_{doc.file_name}"
         await file.download_to_drive(path)
@@ -255,6 +292,7 @@ async def add_phone_excel(update, context):
                     if not pid or not name or qty is None:
                         continue
                     qty = int(qty)
+
                     c.execute("SELECT quantity FROM phones WHERE phone_id=%s", (pid,))
                     r = c.fetchone()
                     if r:
@@ -264,7 +302,13 @@ async def add_phone_excel(update, context):
                     added += 1
                 except Exception as e:
                     log_error(e)
-        os.remove(path)
+        db.close()
+
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+
         await update.message.reply_text(f"✅ Excel orqali {added} ta telefon qo‘shildi")
     except Exception as e:
         log_error(e)
@@ -290,14 +334,18 @@ async def process_id(update, context):
     if not pid.isdigit():
         await update.message.reply_text("❌ ID raqam bo‘lishi kerak")
         return ConversationHandler.END
+
     try:
         db = get_db()
         with db.cursor() as c:
             c.execute("SELECT * FROM phones WHERE phone_id=%s", (pid,))
             phone = c.fetchone()
+        db.close()
+
         if not phone or phone["quantity"] <= 0:
             await update.message.reply_text("❌ Telefon topilmadi yoki tugagan")
             return ConversationHandler.END
+
         context.user_data["phone"] = phone
         kb = ReplyKeyboardMarkup([["✅ Tasdiqlash", "❌ Bekor qilish"]], resize_keyboard=True)
         await update.message.reply_text(
@@ -315,9 +363,11 @@ async def confirm_action(update, context):
         await update.message.reply_text("❌ Bekor qilindi")
         await go_menu(update, context)
         return ConversationHandler.END
+
     try:
         phone = context.user_data["phone"]
         mode = context.user_data["mode"]
+
         db = get_db()
         with db.cursor() as c:
             new_q = phone["quantity"] - 1
@@ -328,10 +378,13 @@ async def confirm_action(update, context):
                 (phone_id, phone_name, remaining_qty, sale_type, sale_date, sale_time)
                 VALUES (%s,%s,%s,%s,%s,%s)
             """, (phone["phone_id"], phone["phone_name"], new_q, mode, now.date(), now.strftime("%H:%M")))
+        db.close()
+
         await update.message.reply_text("✅ Amal bajarildi")
     except Exception as e:
         log_error(e)
         await update.message.reply_text("❌ Xato")
+
     await go_menu(update, context)
     return ConversationHandler.END
 
@@ -356,6 +409,7 @@ async def add_admin_username(update, context):
         db = get_db()
         with db.cursor() as c:
             c.execute("REPLACE INTO users VALUES (%s,%s,'admin')", (context.user_data["uid"], update.message.text))
+        db.close()
         await update.message.reply_text("✅ Admin qo‘shildi")
     except Exception as e:
         log_error(e)
@@ -383,6 +437,7 @@ async def add_seller_username(update, context):
         db = get_db()
         with db.cursor() as c:
             c.execute("REPLACE INTO users VALUES (%s,%s,'seller')", (context.user_data["uid"], update.message.text))
+        db.close()
         await update.message.reply_text("✅ Sotuvchi qo‘shildi")
     except Exception as e:
         log_error(e)
@@ -390,20 +445,40 @@ async def add_seller_username(update, context):
     await go_menu(update, context)
     return ConversationHandler.END
 
+# Remove (role tanlashni to'g'riladik)
+async def remove_admin_list(update, context):
+    context.user_data["remove_role"] = "admin"
+    return await remove_pick(update, context)
+
+async def remove_seller_list(update, context):
+    context.user_data["remove_role"] = "seller"
+    return await remove_pick(update, context)
+
 async def remove_pick(update, context):
     try:
-        role = update.message.text
+        if update.effective_user.id != PRIMARY_ADMIN_ID:
+            await update.message.reply_text("❌ Ruxsat yo‘q")
+            return ConversationHandler.END
+
+        role = context.user_data.get("remove_role")
+        if role not in ("admin", "seller"):
+            await go_menu(update, context)
+            return ConversationHandler.END
+
         db = get_db()
         with db.cursor() as c:
             c.execute("SELECT telegram_id, username FROM users WHERE role=%s", (role,))
             rows = c.fetchall()
+        db.close()
+
         if not rows:
             await update.message.reply_text("📭 Ro‘yxat bo‘sh")
             await go_menu(update, context)
             return ConversationHandler.END
+
         kb = [[f"❌ @{r['username']} | {r['telegram_id']}"] for r in rows]
+        kb.append(["⬅️ Orqaga"])
         await update.message.reply_text("Tanlang:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
-        context.user_data["remove_role"] = role
         return REMOVE_PICK
     except Exception as e:
         log_error(e)
@@ -411,16 +486,24 @@ async def remove_pick(update, context):
         return ConversationHandler.END
 
 async def remove_confirm(update, context):
+    if update.message.text == "⬅️ Orqaga":
+        await go_menu(update, context)
+        return ConversationHandler.END
+
     try:
         uid = update.message.text.split("|")[1].strip()
         role = context.user_data.get("remove_role")
+
         db = get_db()
         with db.cursor() as c:
             c.execute("DELETE FROM users WHERE telegram_id=%s AND role=%s", (uid, role))
+        db.close()
+
         await update.message.reply_text("✅ O‘chirildi")
     except Exception as e:
         log_error(e)
         await update.message.reply_text("❌ Xato")
+
     await go_menu(update, context)
     return ConversationHandler.END
 
@@ -433,6 +516,7 @@ async def clear_store(update, context):
         db = get_db()
         with db.cursor() as c:
             c.execute("DELETE FROM phones")
+        db.close()
         await update.message.reply_text("🧹 Barcha sotilmagan telefonlar o‘chirildi")
     except Exception as e:
         log_error(e)
@@ -442,38 +526,58 @@ async def clear_store(update, context):
 async def export_excel(update, context):
     try:
         db = get_db()
+
         wb1 = Workbook()
         ws1 = wb1.active
-        ws1.append(["ID","Nomi","Qoldiq"])
+        ws1.append(["ID", "Nomi", "Qoldiq"])
         with db.cursor() as c:
             c.execute("SELECT * FROM phones")
             for r in c.fetchall():
                 ws1.append([r["phone_id"], r["phone_name"], r["quantity"]])
-        wb1.save("sotilmagan.xlsx")
-        await update.message.reply_document(open("sotilmagan.xlsx","rb"))
+        wb1_path = "sotilmagan.xlsx"
+        wb1.save(wb1_path)
 
         wb2 = Workbook()
         ws2 = wb2.active
-        ws2.append(["№","ID","Nomi","Qoldiq","Sana","Vaqt","Holat"])
+        ws2.append(["№", "ID", "Nomi", "Qoldiq", "Sana", "Vaqt", "Holat"])
         with db.cursor() as c:
             c.execute("SELECT * FROM sales ORDER BY sale_no")
             for r in c.fetchall():
-                ws2.append([r["sale_no"], r["phone_id"], r["phone_name"], r["remaining_qty"], r["sale_date"], r["sale_time"], r["sale_type"]])
-        wb2.save("sotilgan.xlsx")
-        await update.message.reply_document(open("sotilgan.xlsx","rb"))
+                ws2.append([r["sale_no"], r["phone_id"], r["phone_name"], r["remaining_qty"],
+                            r["sale_date"], r["sale_time"], r["sale_type"]])
+        wb2_path = "sotilgan.xlsx"
+        wb2.save(wb2_path)
+
+        db.close()
+
+        with open(wb1_path, "rb") as f:
+            await update.message.reply_document(f)
+        with open(wb2_path, "rb") as f:
+            await update.message.reply_document(f)
+
+        # ixtiyoriy: fayllarni tozalash
+        try:
+            os.remove(wb1_path)
+            os.remove(wb2_path)
+        except Exception:
+            pass
+
     except Exception as e:
         log_error(e)
         await update.message.reply_text("❌ Excel xatosi")
 
 async def send_log(update, context):
     try:
-        await update.message.reply_document(open("error.log","rb"))
+        with open("error.log", "rb") as f:
+            await update.message.reply_document(f)
     except Exception:
         await update.message.reply_text("📄 Log yo‘q")
 
 # ===================== MAIN =====================
 def main():
+    validate_env()
     init_db()
+
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -527,9 +631,10 @@ def main():
         fallbacks=[]
     ))
 
-    app.add_handler(MessageHandler(filters.Regex("^🗑 Adminni olib tashlash$"), lambda u,c: remove_pick(u,c)))
-    app.add_handler(MessageHandler(filters.Regex("^🗑 Sotuvchini olib tashlash$"), lambda u,c: remove_pick(u,c)))
-    app.add_handler(MessageHandler(filters.Regex("^❌ @"), remove_confirm))
+    # remove handlers (to'g'rilangan)
+    app.add_handler(MessageHandler(filters.Regex("^🗑 Adminni olib tashlash$"), remove_admin_list))
+    app.add_handler(MessageHandler(filters.Regex("^🗑 Sotuvchini olib tashlash$"), remove_seller_list))
+    app.add_handler(MessageHandler(filters.Regex("^❌ @|^⬅️ Orqaga$"), remove_confirm))
 
     app.add_handler(MessageHandler(filters.Regex("^🧹 Do‘kondagi telefonlarni tozalash$"), clear_store))
     app.add_handler(MessageHandler(filters.Regex("^📥 Excel hisobot$"), export_excel))
